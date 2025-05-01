@@ -21,79 +21,25 @@ ALLOWED_CHORD_QUALITIES = [
 ]
 
 def update_track_in_midi_file(midi_file, bars_data, pitch_offset=60, velocity=60, channel=0):
-    """
-    Replaces the existing note_on/note_off events in Track 1 of a MidiFile 
-    with new events derived from (pitch_class, duration_in_ticks) data.
-
-    :param midi_file:   A mido.MidiFile object with at least two tracks 
-                        (track 0 typically has tempo/time-signature, track 1 is music data).
-    :param bars_data:   Nested list of (pitch_class, duration_in_ticks) entries.
-                        Example:
-                          [
-                            [(2, 480), (0, 240), (9, 240), ...],
-                            [(2, 240), (0, 240), (9, 240), (11, 240), ...],
-                            ...
-                          ]
-    :param pitch_offset: MIDI note number for pitch_class=0. 
-                        60 => middle C, 72 => C one octave higher, etc.
-    :param velocity:    Velocity for the new note_on events (note_off uses 0).
-    :param channel:     MIDI channel for these notes (0 = first channel).
-
-    :return:            The same MidiFile object, but with Track 1 updated.
-                        You can then save it via midi_file.save("updated.mid").
-    """
-
-    # Safety check: ensure the file has at least 2 tracks
     track = 0
     old_track1 = midi_file.tracks[track]
 
-    # Create a new track to hold the preserved events + new note events
     new_track1 = MidiTrack()
-    
-    # 1) Copy all non-note messages from the old track 
-    #    (e.g. control_change, program_change, pitchwheel, etc.), 
-    #    skipping old note_on/note_off and end_of_track.
     for msg in old_track1:
         if msg.type in ('note_on', 'note_off', 'end_of_track'):
             # Skip old note messages and the old end_of_track
             continue
         new_track1.append(msg)
 
-    # prev_note_num = None
-    # running_sum = 0
-    # count       = 0
-    # for bar in bars_data:
-    #     for pc, dur in bar:
-    #         # Build the three candidates in each octave
-    #         if prev_note_num is None:
-    #             # First note: just map directly
-    #             note_num = pitch_offset + pc
-    #             print(note_num)
-    #         else:
-    #             # Compute running mean
-    #             mean_ref = running_sum / count
-
-    #             # Determine the octave-aligned candidates
-    #             base_oct = prev_note_num - (prev_note_num % 12)
-    #             candidates = [
-    #                 base_oct + pc,
-    #                 base_oct + pc + 12,
-    #                 base_oct + pc - 12
-    #             ]
-
-    #             def score(n):
-    #                 return 0.3 * abs(n - prev_note_num) + 0.6 * abs(pitch_offset + 6)
-
-    #             note_num = min(candidates, key=score)
-    #             print(note_num)
-
+    last_note_num = 0
     for bar in bars_data:
         for pc, dur in bar:
-            # Build the three candidates in each octave
-                # First note: just map directly
             note_num = pitch_offset + pc
-            # Note on, delta-time=0 from the previous message
 
+            if last_note_num in (60, 61) and note_num in (70, 71):
+                note_num -= 12                    
+
+            last_note_num = note_num
             new_track1.append(Message(
                 'note_on',
                 channel=channel,
@@ -101,7 +47,7 @@ def update_track_in_midi_file(midi_file, bars_data, pitch_offset=60, velocity=60
                 velocity=velocity,
                 time=0
             ))
-            # Corresponding note off, delta-time = duration
+        
             new_track1.append(Message(
                 'note_off',
                 channel=channel,
@@ -109,14 +55,9 @@ def update_track_in_midi_file(midi_file, bars_data, pitch_offset=60, velocity=60
                 velocity=0,
                 time=dur
             ))
-            # prev_note_num = note_num
-            # running_sum += note_num
-            # count      += 1
-
-    # 3) Append a fresh end_of_track meta message
+    
+    
     new_track1.append(MetaMessage('end_of_track', time=0))
-
-    # 4) Assign the new track back into the MidiFile
 
     midi_file.tracks[track] = new_track1
 
@@ -129,12 +70,10 @@ def to_score(file, input_chords):
     us['musescoreDirectPNGPath'] = '/Applications/MuseScore4.app/Contents/MacOS/mscore'
     score = converter.parse(file)
     part  = score.parts[0].makeNotation()
-    
-    # 2) strip out any existing KeySignature objects
+
     for ks in part.recurse().getElementsByClass(key.KeySignature):
         ks.activeSite.remove(ks)
     
-    # 3) put your “Chords: …” line above measure 1
     progression = "   ‖   ".join(input_chords)
     txt = expressions.TextExpression(f"Chords: {progression}")
     txt.placement = "above"
@@ -143,31 +82,24 @@ def to_score(file, input_chords):
     else:
         part.insert(0.0, txt)
     
-    # 4) for each bar, decide flats vs sharps by simple string‐matching
     for i, chord_name in enumerate(input_chords, start=1):
         meas = part.measure(i)
         if not meas:
             continue
         
-        # extract root letter and optional accidental (# or b)
         m = re.match(r'^([A-Ga-g])([b#]?)', chord_name)
         if m:
             letter = m.group(1).upper()
             acc    = m.group(2)
         else:
-            # fallback: treat as a natural
             letter, acc = chord_name[0].upper(), ''
-        
-        # decide spelling
         if acc == '#':
             use_sharps = True
         elif acc == 'b':
             use_sharps = False
         else:
-            # naturals: C & F → flats; D, E, G, A, B → sharps
             use_sharps = False if letter in ('C', 'F') else True
-        
-        # respell every Note in that measure
+    
         for n in meas.recurse().getElementsByClass(note.Note):
             p = n.pitch
             if use_sharps and 'b' in p.name:
@@ -178,23 +110,14 @@ def to_score(file, input_chords):
     return part
 
 def prompt_for_file_path():
-    """
-    Prompt the user to enter a file name (searched in 'inputs/').
-    Continues prompting until an existing file is found.
-    
-    Returns:
-        The full file path (as a string).
-    """
     while True:
         file_name = simpledialog.askstring(
             "File Path", 
             "Please enter the file name (it will be searched in 'inputs/'):"
         )
-        # If the user cancels (None is returned), exit or return None.
         if file_name is None:
             return None
         file_name = file_name.strip()
-        # Prepend the directory 'inputs/' if it isn't already included
         if not file_name.startswith("inputs" + os.sep):
             file_path = os.path.join("inputs", file_name)
         else:
@@ -205,21 +128,13 @@ def prompt_for_file_path():
         else:
             messagebox.showerror("File Not Found", f"'{file_path}' does not exist. Please try again.")
 
-# --- Popup Prompt for Chord Progression ---
 def prompt_for_chord_progression(num_bars):
-    """
-    Prompt the user to enter num_bars chord symbols delineated by commas.
-    Continues prompting until the input has exactly num_bars valid chord symbols.
-    
-    Returns:
-        A list of valid chord symbol strings.
-    """
     while True:
         user_input = simpledialog.askstring(
             "Chord Progression", 
             f"Please enter {num_bars} chord symbols (separated by commas):"
         )
-        # Allow the user to cancel.
+        # Allow the user to cancel
         if user_input is None:
             return None
 
@@ -240,29 +155,14 @@ def prompt_for_chord_progression(num_bars):
                     f"Invalid chord: '{chord}'.\nValid chord qualities are:\n{', '.join(ALLOWED_CHORD_QUALITIES)}\nPlease try again."
                 )
                 invalid_found = True
-                break  # Exit on the first invalid chord
+                break  # Exit on invalid chord
 
         if invalid_found:
             continue
 
-        # All chords are valid.
         return chords_list
 
 def is_valid_chord(chord_str):
-    """
-    Check whether a chord string is valid.
-    
-    A valid chord has:
-      - A tonic: one of the note names A, B, C, D, E, F, or G with an optional sharp '#' or flat 'b'.
-      - A chord quality that exactly matches one from the allowed list (case-insensitive).
-
-    
-    Returns:
-        True if chord_str is valid; False otherwise.
-    """
-    # Define the allowed chord quality descriptors.
-
-    # Normalize to lower-case for a case-insensitive comparison.
     allowed_qualities_set = {q.lower() for q in ALLOWED_CHORD_QUALITIES}
     
     # Define a regex pattern for the tonic: a letter A-G followed optionally by '#' or 'b'.
@@ -272,14 +172,12 @@ def is_valid_chord(chord_str):
         # The chord string doesn't start with a valid tonic.
         return False
 
-    tonic = match.group(1)  # the first group is the tonic (e.g., "C", "F#", "Bb")
-    quality = match.group(2).strip()  # everything else should be the chord quality descriptor
+    tonic = match.group(1) 
+    quality = match.group(2).strip() 
 
-    # Per the given specification, a quality must be provided.
     if quality == "":
         return False
 
-    # Check (case-insensitive) if the provided chord quality is in our allowed list.
     return quality.lower() in allowed_qualities_set
 
 def create_bar_chords(input_chords):
@@ -288,8 +186,6 @@ def create_bar_chords(input_chords):
         bar_chords.append(chords.Chord(chord).get_notes())
     return bar_chords
 
-
-# Map note names (tonic) to pitch-class integers
 NOTE_NAME_TO_PC = {
     'C': 0,  'C#': 1, 'Db': 1,
     'D': 2,  'D#': 3, 'Eb': 3,
@@ -300,7 +196,6 @@ NOTE_NAME_TO_PC = {
     'B':11,  'Cb':11, 'B#': 0
 }
 
-# Canonical scale‑interval patterns (in semitones) for each chord quality
 QUALITY_SCALE_INTERVALS = {
     # Major family
     'major':           [0,2,4,5,7,9,11],          # Ionian
@@ -332,7 +227,6 @@ QUALITY_SCALE_INTERVALS = {
     'minor major seventh':[0,2,3,5,7,9,11],
 }
 
-# Map all ALLOWED_CHORD_QUALITIES to a canonical key in QUALITY_SCALE_INTERVALS
 QUALITY_CANONICAL = {
     # major synonyms
     **dict.fromkeys(['M','major','maj','Δ'], 'major'),
@@ -359,11 +253,6 @@ QUALITY_CANONICAL = {
 }
 
 def chord_to_scale_degrees(chord_str):
-    """
-    Given a chord string like "Cmaj7#5" or "Dm7b5", return the corresponding
-    diatonic scale (list of pitch-classes 0–11) based on quality.
-    """
-    # 1) Split tonic vs. quality
     m = re.match(r'^([A-G](?:#|b)?)(.*)$', chord_str.strip())
     if not m:
         raise ValueError(f"Cannot parse chord '{chord_str}'")
@@ -371,10 +260,10 @@ def chord_to_scale_degrees(chord_str):
     tonic_pc = NOTE_NAME_TO_PC.get(tonic_name)
     if tonic_pc is None:
         raise ValueError(f"Unknown tonic '{tonic_name}' in '{chord_str}'")
-    # 2) Find canonical quality key
+    
     q_key = QUALITY_CANONICAL.get(quality.lower())
     if q_key is None:
         raise ValueError(f"Unknown chord quality '{quality}' in '{chord_str}'")
-    # 3) Get interval pattern, build scale degrees
+
     intervals = QUALITY_SCALE_INTERVALS[q_key]
     return [(tonic_pc + i) % 12 for i in intervals]
