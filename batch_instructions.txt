@@ -1,0 +1,11 @@
+Hello! In order to use batch_process.py, you must put a pair of files in the input folder - one with the name + .mid and one with the name + .chords
+
+The .mid file should be a MIDI file with one track
+
+The .chords file will be a file with the same number of chords as there are bars, delimited by commas. 
+
+For example, ex1.mid has three bars 
+
+ex1.chords would consist of: Dm7, G7, Cmaj7
+
+Enjoy!
